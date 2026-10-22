@@ -254,7 +254,8 @@ TG68KdotC_Kernel
 	.extaddr_mode(2),   // 0=>no,     1=>yes,           2=>switchable with CPU(1)
 	.mul_mode(2),       // 0=>16Bit,  1=>32Bit,         2=>switchable with CPU(1),  3=>no MUL,
 	.div_mode(2),       // 0=>16Bit,  1=>32Bit,         2=>switchable with CPU(1),  3=>no DIV,
-	.bitfield(2)        // 0=>no,     1=>yes,           2=>switchable with CPU(1)
+	.bitfield(2),       // 0=>no,     1=>yes,           2=>switchable with CPU(1)
+	.mmu_reg_xlate(1)   // registered MMU translations: the ATC search off the address path
 )
 cpu_inst_p
 (
