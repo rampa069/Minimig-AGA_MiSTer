@@ -102,7 +102,9 @@ module cpu_wrapper
 
 assign dcache_sw_en = 1'b1;
 
-wire        ec020      = (cpucfg[1:0] == 2'b11) & cpucfg[2];
+// the TG68K.C 68040 build: the 68020/68EC020 and 68030 settings all run the
+// 68040 (Main_MiSTer before 20261020 offers no 68030), so no 24-bit EC020
+wire        ec020      = 1'b0;
 wire [31:0] cpu_addr_m = ec020 ? {8'd0, cpu_addr_p[23:0]} : cpu_addr_p;
 
 wire   ramsel_i     = cpu_req & ~sel_nmi_vector & (sel_zram | sel_chipram | sel_kickram | sel_dd | sel_rtg);
@@ -144,7 +146,7 @@ memory_router u_memory_router
 
 // we route everything hrtmon related through cart.v (needs a couple of signals to
 // decide what to do, would not be good style to replicate that here).
-wire sel_nmi_vector = ((cpu_addr[31:1] == nmi_addr[31:1]) || (cpu_addr[31:1] == nmi_addr2[31:1])) && (cpustate == 2);
+wire sel_nmi_vector = ((cpu_addr[31:1] == nmi_addr[31:1]) || (cpu_addr[31:1] == nmi_addr2[31:1])) && (cpustate == 2) && ~mmu_on_p;
 
 wire [15:0] ramdat;
 
@@ -239,6 +241,12 @@ wire        long_cand;
 wire [15:0] cpu_dout_lo_p;
 wire        long_ack;
 
+// TG68K.C with the 68040 mode (github.com/rampa069/TG68K.C, branch bus32):
+// the 68020/68EC020 and "68030" settings run it as a 68040 with MMU and FPU
+// (CPU "10"); the
+// FPU leaves to the M68040FPSP what a 68040 leaves to it (68040.library).
+// No cycle-exact 68EC020 and no 32-bit fast RAM path in this build.
+wire mmu_on_p;
 TG68KdotC_Kernel
 #(
 	.sr_read(2),        // 0=>user,   1=>privileged,    2=>switchable with CPU(0)
@@ -256,6 +264,7 @@ cpu_inst_p
   .data_in(cpu_din),
   .ipl(cpu_ipl),
   .ipl_autovector(1),
+  .berr(1'b0),
   .regin_out(),
   .addr_out(cpu_addr_p),
   .data_write(cpu_dout_p),
@@ -264,25 +273,16 @@ cpu_inst_p
   .nlds(lds_p),
   .nresetout(reset_out_p),
   .longword(longword),
-  .s21_en(s21_en),
-  .long_cand(long_cand),
-  .long_ack(long_ack),
-  .data_in_hi(ramdout_hi),
+  .long_req(long_cand),
+  .long_ack(1'b0),
+  .data_in_lo(16'h0000),
   .data_write_lo(cpu_dout_lo_p),
-  
-  .cpu({cpucfg[1], cpucfg[1] | cpucfg[0]}),
-  .cpu030(cpu030),
-  .opc_start(opc_start),
-  .opc_out(opc_out),
-  .opc_cond(opc_cond),
-  .opc_snd(opc_snd),
-  .opc_dbx(opc_dbx),
-  .opc_cacr(cacr_x),
-  .mmu_busy(mmu_busy),
+  .cpu(cpucfg[1] ? 2'b10 : {1'b0, cpucfg[0]}),		// 68040 for 68020/68EC020/68030, else 68010
   .busstate(cpustate_p),		// 0: fetch code, 1: no memaccess, 2: read data, 3: write data
   .cacr_out(cacr_p),
   .d_cache_out(),
-  .vbr_out(vbr_p)
+  .vbr_out(vbr_p),
+  .mmu_on_out(mmu_on_p)
 );
 
 wire [15:0] cpu_dout_o;
@@ -349,28 +349,7 @@ wire cpu030        = (cpucfg[1:0] == 2'b10);
 wire stock_speed   = cpucfg[2] & (cpucfg[1:0] == 2'b11);
 wire clkena_p_base = ~cpu_req | chipready | ramready | fastchip_ready;
 
-wire cyc_hold;
-cpu_cycles cycles
-(
-	.clk(clk),
-	.reset(reset),
-	.ntsc(ntsc),
-	.mode({cpu030 & |cpucfg[4:3], stock_speed | (cpu030 & cpucfg[4])}),
-	.opc_start(opc_start),
-	.opc(opc_out),
-	.opc_cond(opc_cond),
-	.opc_snd(opc_snd),
-	.opc_dbx(opc_dbx),
-	.cpu_ena(clkena_p_throttled & ~mmu_busy),
-	.bus_ack(clkena_p_throttled & cpu_req),
-	.bus_state(cpustate_p),
-	.bus_addr(cpu_addr_m),
-	.bus_long(longword),
-	.bus_l1(clkena_p_throttled & long_ack),
-	.cacr(cacr_x),
-	.cacr_clr(cacr_p[3]),
-	.hold(cyc_hold)
-);
+wire cyc_hold = 1'b0;		// no cycle-exact 68EC020 with this core
 
 reg inflight;
 always @(posedge clk) begin
@@ -383,9 +362,9 @@ wire req_gate = cyc_hold & ~inflight;
 wire clkena_p_throttled = clkena_p_base & (cpu_req ? ~req_gate : ~cyc_hold);
 
 assign s21_en    = cpu030;
-assign ramlong1  = long_cand & s21_en & sel_zram & ~sel_rtg & ~sel_dd & ~req_gate;
+assign ramlong1  = 1'b0;
 assign ramdin_lo = cpu_dout_lo_p;
-assign long_ack  = ramlong1 & ramready_l;
+assign long_ack  = 1'b0;
 
 reg       chipreq;
 reg [2:0] cpu_ipl;

@@ -43,6 +43,7 @@ generic(
 		exe_condition			: in std_logic;
 		exec_tas					: in std_logic;
 		long_start				: in bit;
+		long_fast				: in bit := '0';		-- a long in one bus cycle (MOVEM steps by 4)
 		non_aligned				: in std_logic;
 		check_aligned			: in std_logic;
 		movem_presub			: in bit;
@@ -71,6 +72,8 @@ generic(
 
 		set_V_Flag				: buffer bit;
 		Flags						: buffer std_logic_vector(7 downto 0);
+		ccr_force				: in std_logic := '0';			-- load ccr_val (address error of a MOVE)
+		ccr_val					: in std_logic_vector(4 downto 0) := "00000";
 		c_out						: buffer std_logic_vector(2 downto 0);
 		addsub_q					: buffer std_logic_vector(31 downto 0);
 		ALUout					: out std_logic_vector(31 downto 0)
@@ -94,6 +97,8 @@ architecture logic of TG68K_ALU is
 	signal flag_z				: std_logic_vector(2 downto 0);
 	signal set_Flags			: std_logic_vector(3 downto 0);	--NZVC
 	signal CCRin				: std_logic_vector(7 downto 0);
+	signal stop_ccr			: std_logic_vector(7 downto 0);	-- CCR from STOP #imm
+	signal stop_ccr_pending	: bit := '0';
 	signal last_Flags1		: std_logic_vector(3 downto 0);	--NZVC
     
 --BCD
@@ -138,6 +143,7 @@ architecture logic of TG68K_ALU is
 	signal div_bit				: std_logic;
 	signal div_sub				: std_logic_vector(32 downto 0);
 	signal div_over			: std_logic_vector(32 downto 0);
+	signal div_over_s		: std_logic_vector(32 downto 0);	-- |dividend| high - |divisor| (DIVS.L)
 	signal nozero				: std_logic;
 	signal div_qsign			: std_logic;
 	signal dividend			: std_logic_vector(63 downto 0);
@@ -146,21 +152,6 @@ architecture logic of TG68K_ALU is
 	signal OP1_sign			: std_logic;
 	signal OP2_sign			: std_logic;
 	signal OP2outext			: std_logic_vector(15 downto 0);
-	signal chk_V				: std_logic;
-	signal chk_C				: std_logic;
-	signal chk2_N				: std_logic;
-	signal chk2_V				: std_logic;
-	signal chk2_sL			: std_logic;
-	signal chk2_l31z			: std_logic;
-	signal div_a31			: std_logic;
-	signal div_az				: std_logic;
-	signal div_ahz			: std_logic;
-	signal div_ah0			: std_logic;
-	signal div_ahgt			: std_logic;
-	signal div_absovl		: std_logic;
-	signal div_abs17			: std_logic_vector(16 downto 0);
-	signal div_ah				: std_logic_vector(31 downto 0);
-	signal div_aq8			: std_logic_vector(7 downto 0);
 
 	signal in_offset			: std_logic_vector(5 downto 0);
 	signal datareg				: std_logic_vector(31 downto 0);
@@ -301,7 +292,7 @@ PROCESS (OP2out, reg_QB, opcode, OP1out, OP1in, exe_datatype, addsub_q, execOPC,
 -----------------------------------------------------------------------------
 -- addsub
 -----------------------------------------------------------------------------
-PROCESS (OP1out, OP2out, execOPC, Flags, long_start, movem_presub, exe_datatype, exec, addsub_a, addsub_b, opaddsub,
+PROCESS (OP1out, OP2out, execOPC, Flags, long_start, long_fast, movem_presub, exe_datatype, exec, addsub_a, addsub_b, opaddsub,
 	     notaddsub_b, add_result, c_in, sndOPC, non_aligned, check_aligned)
 	BEGIN
 		addsub_a <= OP1out;
@@ -324,7 +315,12 @@ PROCESS (OP1out, OP2out, execOPC, Flags, long_start, movem_presub, exe_datatype,
 		IF exec(opcUNPACK)='1' THEN
 			addsub_b(15 downto 0) <= "0000" & OP2out(7 downto 4) & "0000" & OP2out(3 downto 0);
 		ELSIF execOPC='0' AND exec(OP2out_one)='0' AND exec(get_bfoffset)='0'THEN
-			IF long_start='0' AND exe_datatype="00" AND exec(use_SP)='0' THEN
+			IF long_fast='1' AND exec(movem_action)='1' THEN
+				-- MOVEM with the long in one bus cycle: the next register is 4
+				-- bytes on (or, for -(An), 4 bytes down: the two word cycles add
+				-- 2 and subtract 6)
+				addsub_b <= "00000000000000000000000000000100";
+			ELSIF long_start='0' AND exe_datatype="00" AND exec(use_SP)='0' THEN
 				addsub_b <= "00000000000000000000000000000001";
 			ELSIF long_start='0' AND exe_datatype="10" AND (exec(presub) OR exec(postadd) OR movem_presub)='1' THEN
 				IF exec(movem_action)='1' THEN
@@ -963,128 +959,6 @@ process (OP1out, OP2out, opcode, bit_nr, bit_msb, bs_shift, bs_shift_mod, ring, 
   end process;
 
   
-PROCESS (exe_datatype, OP1out, OP2out, addsub_q, c_out)
-	VARIABLE sd, ss, sg, tr, vv : std_logic;
-	BEGIN
-		IF exe_datatype="01" THEN
-			sd := OP1out(15);
-			ss := OP2out(15);
-			sg := NOT addsub_q(15);
-			tr := NOT c_out(1);
-		ELSE
-			sd := OP1out(31);
-			ss := OP2out(31);
-			sg := NOT addsub_q(31);
-			tr := NOT c_out(2);
-		END IF;
-		tr := tr OR sd OR ss;
-		vv := (ss XOR sd) AND (ss XOR sg);
-		chk_V <= tr AND vv;
-		IF sd='1' THEN
-			chk_C <= tr AND ((sg XOR vv) OR NOT ss);
-		ELSE
-			chk_C <= tr AND NOT ss;
-		END IF;
-	END PROCESS;
-
-PROCESS (exe_opcode, sndOPC, OP1out, OP2out, Flags, last_Flags1, set_flags, chk2_sL, chk2_l31z, addsub_q)
-	VARIABLE sU, sR, ltRL, ltRU, gtRL, gtRU, gtLU, wVL, wLV, wUV, n, v : std_logic;
-	BEGIN
-		IF exe_opcode(10 downto 9)="00" THEN
-			sU := OP2out(7);
-			sR := OP1out(7);
-		ELSIF exe_opcode(10 downto 9)="01" THEN
-			sU := OP2out(15);
-			sR := OP1out(15);
-		ELSE
-			sU := OP2out(31);
-			sR := OP1out(31);
-		END IF;
-		IF sndOPC(15)='1' THEN
-			sR := OP1out(31);
-		END IF;
-		ltRL := Flags(3) XOR Flags(1);
-		ltRU := set_flags(3) XOR set_flags(1);
-		gtRL := NOT ltRL AND NOT Flags(2);
-		gtRU := NOT ltRU AND NOT set_flags(2);
-		gtLU := last_Flags1(3) XOR last_Flags1(1);
-		wVL := ltRL;
-		wLV := gtRL;
-		wUV := gtRU;
-		IF exe_opcode(10 downto 9)="10" OR sndOPC(15)='1' THEN
-			wVL := Flags(3);
-			wLV := NOT Flags(2) AND (NOT Flags(3) OR chk2_l31z);
-			IF addsub_q(30 downto 0)="0000000000000000000000000000000" THEN
-				wUV := NOT set_flags(2);
-			ELSE
-				wUV := NOT set_flags(2) AND NOT set_flags(3);
-			END IF;
-		END IF;
-		n := '0';
-		v := '0';
-		IF Flags(2)='0' AND set_flags(2)='0' THEN
-			IF chk2_sL='1' AND sU='0' THEN
-				n := ltRL OR (NOT sR AND ltRU);
-				IF sR='0' AND wLV='0' THEN
-					v := '1';
-					n := gtRU;
-				END IF;
-			ELSIF chk2_sL='0' AND sU='1' THEN
-				n := NOT sR OR gtRU;
-				IF gtRL='1' AND wUV='0' THEN
-					v := '1';
-					n := '0';
-				END IF;
-			ELSIF chk2_sL='0' AND gtLU='1' THEN
-				n := gtRU AND ltRL;
-				IF sR='1' THEN
-					v := wLV;
-					n := n OR NOT wLV;
-				END IF;
-			ELSIF chk2_sL='0' THEN
-				n := (NOT sR AND ltRL) OR gtRU;
-				IF sR='1' AND wUV='1' THEN
-					v := '1';
-					n := '1';
-				END IF;
-			ELSIF gtLU='1' THEN
-				n := NOT sR OR (gtRU AND ltRL);
-				IF sR='0' AND wVL='1' THEN
-					v := '1';
-					n := '0';
-				END IF;
-			ELSE
-				n := ltRL OR (gtRU AND sR);
-				IF sR='0' AND wVL='1' THEN
-					v := '1';
-					n := '1';
-				END IF;
-			END IF;
-		END IF;
-		chk2_N <= n;
-		chk2_V <= v;
-	END PROCESS;
-
-PROCESS (clk)
-	BEGIN
-		IF rising_edge(clk) THEN
-			IF clkena_lw='1' AND micro_state=chk22 THEN
-				IF exe_opcode(10 downto 9)="00" THEN
-					chk2_sL <= OP2out(7);
-				ELSIF exe_opcode(10 downto 9)="01" THEN
-					chk2_sL <= OP2out(15);
-				ELSE
-					chk2_sL <= OP2out(31);
-				END IF;
-				IF addsub_q(30 downto 0)="0000000000000000000000000000000" THEN
-					chk2_l31z <= '1';
-				ELSE
-					chk2_l31z <= '0';
-				END IF;
-			END IF;
-		END IF;
-	END PROCESS;
-
 ------------------------------------------------------------------------------
 --CCR op
 ------------------------------------------------------------------------------		
@@ -1133,8 +1007,9 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, fl
 		IF rising_edge(clk) THEN		
 			IF Reset='1' THEN
 				Flags(7 downto 0) <= "00000000"; 
+				stop_ccr_pending <= '0';
 			ELSIF clkena_lw = '1' THEN
-				IF exec(directSR)='1' OR set_stop='1' THEN
+				IF exec(directSR)='1' THEN
 					Flags(7 downto 0) <= data_read(7 downto 0);
 				END IF;	
 				IF exec(directCCR)='1' THEN
@@ -1157,17 +1032,6 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, fl
 						ELSE
 							Flags(3 downto 0) <= "0100";
 						END IF;
-						IF CPU(1)='1' THEN
-							IF exe_opcode(15)='1' THEN
-								IF exe_opcode(8)='0' THEN
-									Flags(3 downto 0) <= div_a31&div_ahz&"10";
-								END IF;
-							ELSIF sndOPC(11)='0' THEN
-								Flags(3 downto 0) <= div_a31&div_az&"10";
-							ELSE
-								Flags(3 downto 0) <= "01"&Flags(1)&'0';
-							END IF;
-						END IF;
 					END IF;
 				ELSIF exec(no_Flags)='0' THEN
 					last_Flags1 <= Flags(3 downto 0);
@@ -1184,30 +1048,6 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, fl
 					ELSIF exec(opcDIVU)='1' AND DIV_Mode/=3 THEN
 						IF V_Flag='1' THEN	
 							Flags(3 downto 0) <= "1010";
-							IF CPU(1)='1' THEN
-								IF exe_opcode(15)='1' AND exe_opcode(8)='0' THEN
-									Flags(3) <= Flags(3) OR div_a31;
-									Flags(2) <= Flags(2);
-									Flags(0) <= Flags(0);
-								ELSIF exe_opcode(15)='1' THEN
-									Flags(3) <= div_aq8(7) AND NOT div_absovl;
-									IF div_aq8="00000000" AND div_absovl='0' THEN
-										Flags(2) <= '1';
-									ELSE
-										Flags(2) <= '0';
-									END IF;
-								ELSIF sndOPC(11)='0' OR sndOPC(10)='0' THEN
-									Flags(3) <= div_a31 AND NOT div_az;
-									Flags(2) <= div_az;
-								ELSIF div_ah0='1' THEN
-									Flags(3 downto 2) <= "01";
-								ELSIF div_ahgt='1' THEN
-									Flags(3 downto 2) <= "00";
-								ELSE
-									Flags(3) <= (div_a31 XOR div_ah(31)) AND NOT div_az;
-									Flags(2) <= div_az;
-								END IF;
-							END IF;
 						ELSIF exe_opcode(15)='1' OR DIV_Mode=0 THEN
 							Flags(3 downto 0) <= OP1IN(15)&flag_z(1)&"00";
 						ELSE
@@ -1256,10 +1096,6 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, fl
 						Flags(1) <= '0';
 						Flags(2) <= Flags(2) OR set_flags(2);
 						Flags(3) <= NOT last_Flags1(0); 
-						IF CPU(1)='1' THEN
-							Flags(3) <= chk2_N;
-							Flags(1) <= chk2_V;
-						END IF;
 					ELSIF exec(opcCHK)='1' THEN
 						IF exe_datatype="01" THEN 						--Word
 							Flags(3) <= OP1out(15);
@@ -1273,12 +1109,22 @@ PROCESS (clk, Reset, exe_opcode, exe_datatype, Flags, last_data_read, OP2out, fl
 						END IF;	
 						Flags(1) <= '0';
 						Flags(0) <= '0';
-						IF CPU(1)='1' THEN
-							Flags(1) <= chk_V;
-							Flags(0) <= chk_C;
-						END IF;
 					END IF;
 				END IF;	
+				-- STOP: the immediate is read on the decode edge, the edge on which
+				-- the previous instruction writes its flags (and used to overwrite
+				-- the new CCR). Keep it and load it on the next edge, once that
+				-- write is done; the CPU is stopped by then.
+				IF set_stop='1' THEN
+					stop_ccr <= data_read(7 downto 0);
+					stop_ccr_pending <= '1';
+				ELSIF stop_ccr_pending='1' THEN
+					Flags(7 downto 0) <= stop_ccr;
+					stop_ccr_pending <= '0';
+				END IF;
+				IF ccr_force='1' THEN
+					Flags(4 downto 0) <= ccr_val;
+				END IF;
 			END IF;	
 			Flags(7 downto 5) <= "000";
 		END IF;	
@@ -1414,7 +1260,7 @@ PROCESS (clk)
 ---- DIVU/DIVS
 -------------------------------------------------------------------------------
 		
-PROCESS (execOPC, OP1out, OP2out, div_reg, div_neg, div_bit, div_sub, div_quot, OP1_sign, div_over, result_div, reg_QA, opcode, sndOPC, divs, exe_opcode, reg_QB, 
+PROCESS (execOPC, OP1out, OP2out, div_reg, div_neg, div_bit, div_sub, div_quot, OP1_sign, div_over, div_over_s, result_div, reg_QA, opcode, sndOPC, divs, exe_opcode, reg_QB, 
 	     signedOP, nozero, div_qsign, OP2outext, result_div_pre)
 	BEGIN
 		divs <= (opcode(15) AND opcode(8)) OR (NOT opcode(15) AND sndOPC(11));
@@ -1451,11 +1297,6 @@ PROCESS (execOPC, OP1out, OP2out, div_reg, div_neg, div_bit, div_sub, div_quot, 
 			div_quot(63 downto 32) <= div_sub(31 downto 0);	
 		END IF;	
 		div_quot(31 downto 0) <= div_reg(30 downto 0)&NOT div_bit;
-		IF OP2out(15)='0' THEN
-			div_abs17 <= ('0'&div_reg(47 downto 32))-('0'&OP2out(15 downto 0));
-		ELSE
-			div_abs17 <= ('0'&div_reg(47 downto 32))+('0'&OP2out(15 downto 0));
-		END IF;
 		
 		IF div_neg='1' THEN
 			result_div_pre(31 downto 0) <= 0-div_quot(31 downto 0);
@@ -1465,7 +1306,11 @@ PROCESS (execOPC, OP1out, OP2out, div_reg, div_neg, div_bit, div_sub, div_quot, 
 		END IF;	
 		
 		IF (((nozero='1' OR div_bit='0') AND signedOP='1' AND (OP2out(31) XOR OP1_sign XOR div_qsign)='1' )	--Overflow DIVS
-			OR (signedOP='0' AND div_over(32)='0')) AND DIV_Mode/=3 THEN	--Overflow DIVU
+			OR (signedOP='0' AND div_over(32)='0')	--Overflow DIVU
+			-- DIVS.L: when the high half of |dividend| is not below |divisor| the
+			-- quotient needs more than 32 bits, and the truncated quotient may
+			-- still have the expected sign (for example (2^63 - 3) / -1)
+			OR (signedOP='1' AND exe_opcode(15)='0' AND DIV_Mode/=0 AND div_over_s(32)='0')) AND DIV_Mode/=3 THEN
 			set_V_Flag <= '1';
 		ELSE	
 			set_V_Flag <= '0';
@@ -1482,23 +1327,6 @@ PROCESS (clk)
 				signedOP <= divs;
 				IF micro_state=div1 THEN
 					nozero <= '0';
-					div_a31 <= reg_QA(31);
-					IF reg_QA=X"00000000" THEN
-						div_az <= '1';
-					ELSE
-						div_az <= '0';
-					END IF;
-					IF reg_QA(31 downto 16)=X"0000" THEN
-						div_ahz <= '1';
-					ELSE
-						div_ahz <= '0';
-					END IF;
-					IF reg_QB=X"00000000" THEN
-						div_ah0 <= '1';
-					ELSE
-						div_ah0 <= '0';
-					END IF;
-					div_ah <= reg_QB;
 					IF divs='1' AND dividend(63)='1' THEN				-- Neg dividend
 						OP1_sign <= '1';
 						div_reg <= 0-dividend;
@@ -1512,21 +1340,20 @@ PROCESS (clk)
 				END IF;
 				IF micro_state=div2 THEN
 					div_neg <= signedOP AND (OP2out(31) XOR OP1_sign);
-					IF div_ah(31)='1' AND OP2out(31)='1' AND div_ah>OP2out THEN
-						div_ahgt <= '1';
-					ELSE
-						div_ahgt <= '0';
-					END IF;
-					div_absovl <= div_abs17(16) XOR NOT OP2out(15);
 					IF DIV_Mode=0 THEN
 						div_over(32 downto 16) <= ('0'&div_reg(47 downto 32))-('0'&OP2out(15 downto 0));
 					ELSE	
 						div_over <= ('0'&div_reg(63 downto 32))-('0'&OP2outext(15 downto 0)&OP2out(15 downto 0));
 					END IF;	
+					-- div_reg holds |dividend| here
+					IF OP2out(31)='1' THEN
+						div_over_s <= ('0'&div_reg(63 downto 32))-('0'&(0-OP2out(31 downto 0)));
+					ELSE
+						div_over_s <= ('0'&div_reg(63 downto 32))-('0'&OP2out(31 downto 0));
+					END IF;
 				END IF;
 				IF exec(write_reminder)='0' THEN
 					result_div(31 downto 0) <= result_div_pre;
-					div_aq8 <= div_quot(7 downto 0);
 					IF OP1_sign='1' THEN
 						result_div(63 downto 32) <= 0-div_quot(63 downto 32);
 					ELSE

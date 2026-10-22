@@ -85,8 +85,9 @@ set_multicycle_path -from {yc_out|chroma_LUT_BURST[*]} \
 set_multicycle_path -setup 2 -from [get_clocks "emu|pll|pll_inst|altera_pll_i|cyclonev_pll|counter\[1\].output_counter|divclk"] -to [get_clocks "emu|pll|pll_inst|altera_pll_i|cyclonev_pll|counter\[0\].output_counter|divclk"]
 set_multicycle_path -hold 1 -from [get_clocks "emu|pll|pll_inst|altera_pll_i|cyclonev_pll|counter\[1\].output_counter|divclk"] -to [get_clocks "emu|pll|pll_inst|altera_pll_i|cyclonev_pll|counter\[0\].output_counter|divclk"]
 
-set_multicycle_path -from {emu|cpu_wrapper|cycles|hold} -to {emu|ram*} -setup 1
-set_multicycle_path -from {emu|cpu_wrapper|cycles|hold} -to {emu|ram*} -hold 0
+# no cpu_cycles with the TG68K.C 68040 build (cyc_hold is 0)
+#set_multicycle_path -from {emu|cpu_wrapper|cycles|hold} -to {emu|ram*} -setup 1
+#set_multicycle_path -from {emu|cpu_wrapper|cycles|hold} -to {emu|ram*} -hold 0
 set_multicycle_path -from {emu|cpu_wrapper|inflight} -to {emu|ram*} -setup 1
 set_multicycle_path -from {emu|cpu_wrapper|inflight} -to {emu|ram*} -hold 0
 
